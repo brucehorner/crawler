@@ -2,51 +2,50 @@ package main
 
 import (
 	"flag"
-	"time"
 	"fmt"
 	"golang.org/x/net/html"
 	"net/http"
 	"net/url"
-  "sync"
+	"sync"
+	"time"
 )
 
-var known = struct{
-  sync.RWMutex
-  m map[string]bool
+var known = struct {
+	sync.RWMutex
+	m map[string]bool
 }{m: make(map[string]bool)}
 
 func main() {
 	maxdepth := flag.Int("maxdepth", 0, "Maximum depth to crawl")
-  domainsticky := flag.Bool("domainsticky", true, "If true, stay within original domain")
+	domainsticky := flag.Bool("domainsticky", true, "If true, stay within original domain")
 	flag.Parse()
 	URLs := flag.Args()
-  var waitgroup sync.WaitGroup
-//TODO:  finish concurrency
-//  waitgroup.Add(len(URLs))
+	var waitgroup sync.WaitGroup
+	//TODO:  finish concurrency
+	//  waitgroup.Add(len(URLs))
 	for _, url := range URLs {
 		process(&waitgroup, nil, url, 1, *maxdepth, *domainsticky)
 		fmt.Println()
 	}
-//  waitgroup.Wait()
-  fmt.Printf("Completed. Found %d unique URLs\n", len(known.m))
+	//  waitgroup.Wait()
+	fmt.Printf("Completed. Found %d unique URLs\n", len(known.m))
 }
-
 
 func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth int, maxdepth int, domainsticky bool) {
 
-//  defer waitgroup.Done()
+	//  defer waitgroup.Done()
 
-  // bail out if this has already been seen
-  // otherwise add this to the found list
-  known.RLock()
-  if known.m[thisURL] {
-    known.RUnlock()
-    return
+	// bail out if this has already been seen
+	// otherwise add this to the found list
+	known.RLock()
+	if known.m[thisURL] {
+		known.RUnlock()
+		return
 	} else {
-    known.RUnlock()
-    known.Lock()
+		known.RUnlock()
+		known.Lock()
 		known.m[thisURL] = true
-    known.Unlock()
+		known.Unlock()
 	}
 
 	fmt.Printf("%3d ", depth)
@@ -57,14 +56,14 @@ func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth
 	}
 	fmt.Printf(" %s", thisURL)
 
-  start := time.Now()
+	start := time.Now()
 	response, error := http.Get(thisURL)
-  duration := time.Now().Sub(start)
+	duration := time.Now().Sub(start)
 	if error == nil {
-    inMillis := duration.Nanoseconds() / int64(time.Millisecond)
+		inMillis := duration.Nanoseconds() / int64(time.Millisecond)
 		fmt.Printf(" \"%s\" %dms\n", response.Status, inMillis)
 
-	// maxdepth of zero means: no max depth , i.e. infinite
+		// maxdepth of zero means: no max depth , i.e. infinite
 		if maxdepth != 0 && depth >= maxdepth {
 			return
 		}
@@ -79,7 +78,7 @@ func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth
 				return
 			case tokenType == html.StartTagToken:
 				token := tokenizer.Token()
-        // skip every tag except anchor tags
+				// skip every tag except anchor tags
 				if token.Data != "a" {
 					continue
 				} else {
@@ -92,7 +91,7 @@ func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth
 
 							uThis, _ := url.Parse(thisURL)
 							uChild, e := url.Parse(childURL)
-              if e != nil {
+							if e != nil {
 								fmt.Println(childURL, " =>", e)
 								continue
 							}
@@ -103,9 +102,9 @@ func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth
 								continue
 							}
 
-						// if this crawl is supposed to stay within the original domain
-						// then don't venture outside for any explicitly stated
-						// external domains
+							// if this crawl is supposed to stay within the original domain
+							// then don't venture outside for any explicitly stated
+							// external domains
 							if domainsticky {
 								startDomain := uThis.Hostname()
 								childDomain := uChild.Hostname()
@@ -115,7 +114,7 @@ func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth
 							}
 
 							//waitgroup.Add(1)
-							process(waitgroup, &thisURL, childURL, depth + 1, maxdepth, domainsticky)
+							process(waitgroup, &thisURL, childURL, depth+1, maxdepth, domainsticky)
 						}
 					}
 				}
