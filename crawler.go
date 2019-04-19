@@ -2,38 +2,78 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"golang.org/x/net/html"
+	"log"
 	"net/http"
-	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
+// hold list of visited URLs
 var known = struct {
 	sync.RWMutex
 	m map[string]bool
 }{m: make(map[string]bool)}
 
+type Result struct {
+	err       error
+	depth     int
+	parentURL *string // optional to deal with starting URL having no parent
+	thisURL   string
+	response  *http.Response
+	timeMS    int64
+	start     time.Time
+	end       time.Time
+}
+
+// after parsing command line kick off potentially recursive search over the URLs
+
 func main() {
 	maxdepth := flag.Int("maxdepth", 0, "Maximum depth to crawl")
 	domainsticky := flag.Bool("domainsticky", true, "If true, stay within original domain")
+	timestamps := flag.Bool("timestamps", false, "show start/end timestamps when true")
 	flag.Parse()
 	URLs := flag.Args()
-	var waitgroup sync.WaitGroup
-	//TODO:  finish concurrency
-	//  waitgroup.Add(len(URLs))
-	for _, url := range URLs {
-		process(&waitgroup, nil, url, 1, *maxdepth, *domainsticky)
-		fmt.Println()
+	cosmeticPlural := ""
+	if len(URLs) != 1 {
+		cosmeticPlural = "s"
 	}
-	//  waitgroup.Wait()
-	fmt.Printf("Completed. Found %d unique URLs\n", len(known.m))
+	log.Printf("Starting scan of %d URL%s...\n", len(URLs), cosmeticPlural)
+
+	// open a waitgroup to make sure we close resources only when all workers are done
+	// use two channels:  reporting for workers to share their results;  command to talk
+	// to the collector
+
+	var wg sync.WaitGroup
+	reporting := make(chan Result, 10)
+	command := make(chan string)
+	go Collector(reporting, command, *timestamps)
+
+	start := time.Now()
+	for _, url := range URLs {
+		wg.Add(1)
+		go visit(reporting, &wg, nil, url, 1, *maxdepth, *domainsticky)
+	}
+
+	// block for all URLs to be visited
+	wg.Wait()
+	duration := time.Now().Sub(start)
+	inMillis := duration.Nanoseconds() / int64(time.Millisecond)
+
+	// tell collator to clean up and wait here for the response that it did
+	command <- "quit"
+	<-command
+
+	close(reporting)
+	close(command)
+
+	log.Printf("Found %d unique URLs in %d ms.\n", len(known.m), inMillis)
 }
 
-func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth int, maxdepth int, domainsticky bool) {
+func visit(reporting chan Result, wg *sync.WaitGroup, parentURL *string, thisURL string, depth int, maxdepth int, domainsticky bool) {
 
-	//  defer waitgroup.Done()
+	defer wg.Done()
 
 	// bail out if this has already been seen
 	// otherwise add this to the found list
@@ -48,79 +88,37 @@ func process(waitgroup *sync.WaitGroup, parentURL *string, thisURL string, depth
 		known.Unlock()
 	}
 
-	fmt.Printf("%3d ", depth)
-	if parentURL == nil {
-		fmt.Print("root")
-	} else {
-		fmt.Print(*parentURL)
-	}
-	fmt.Printf(" %s", thisURL)
-
 	start := time.Now()
-	response, error := http.Get(thisURL)
-	duration := time.Now().Sub(start)
-	if error == nil {
-		inMillis := duration.Nanoseconds() / int64(time.Millisecond)
-		fmt.Printf(" \"%s\" %dms\n", response.Status, inMillis)
+	response, err := http.Get(thisURL)
+	end := time.Now()
+	duration := end.Sub(start)
+	inMillis := duration.Nanoseconds() / int64(time.Millisecond)
+	result := Result{err, depth, parentURL, thisURL, response, inMillis, start, end}
+	reporting <- result
 
+	if err == nil {
 		// maxdepth of zero means: no max depth , i.e. infinite
 		if maxdepth != 0 && depth >= maxdepth {
 			return
 		}
 
-		body := response.Body
-		defer body.Close()
-		tokenizer := html.NewTokenizer(body)
-		for {
-			tokenType := tokenizer.Next()
-			switch {
-			case tokenType == html.ErrorToken:
-				return
-			case tokenType == html.StartTagToken:
-				token := tokenizer.Token()
-				// skip every tag except anchor tags
-				if token.Data != "a" {
-					continue
-				} else {
-					for _, a := range token.Attr {
-						if a.Key == "href" {
-							childURL := a.Val
-							if len(childURL) == 0 {
-								continue
-							}
-
-							uThis, _ := url.Parse(thisURL)
-							uChild, e := url.Parse(childURL)
-							if e != nil {
-								fmt.Println(childURL, " =>", e)
-								continue
-							}
-							if len(uChild.Scheme) == 0 {
-								// extract domain from parent and prefix with it
-								childURL = uThis.Scheme + "://" + uThis.Host + childURL
-							} else if uChild.Scheme == "mailto" {
-								continue
-							}
-
-							// if this crawl is supposed to stay within the original domain
-							// then don't venture outside for any explicitly stated
-							// external domains
-							if domainsticky {
-								startDomain := uThis.Hostname()
-								childDomain := uChild.Hostname()
-								if len(childDomain) > 0 && startDomain != childDomain {
-									continue
-								}
-							}
-
-							//waitgroup.Add(1)
-							process(waitgroup, &thisURL, childURL, depth+1, maxdepth, domainsticky)
-						}
-					}
+		// don't continue if this looks like application data such as a PDF
+		header := response.Header
+		if header["Content-Type"] != nil {
+			for _, val := range header["Content-Type"] {
+				if strings.Contains(val, "application") {
+					log.Printf("skipping Content-Type '%s' for page '%s'\n", val, thisURL)
+					return
 				}
 			}
 		}
-	} else {
-		fmt.Printf(" %s\n", error)
+
+		body := response.Body
+		defer body.Close()
+		URLs := extractHyperlinks(thisURL, html.NewTokenizer(body), domainsticky)
+		for _, url := range URLs {
+			wg.Add(1)
+			go visit(reporting, wg, &thisURL, url, depth+1, maxdepth, domainsticky)
+		}
 	}
 }
